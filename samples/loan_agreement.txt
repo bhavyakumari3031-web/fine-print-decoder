@@ -1,0 +1,9 @@
+QuickCash Finance - Personal Loan Agreement
+1. Loan amount: Rs 50,000. Tenure: 12 months.
+2. Interest: 1.5% per month, charged on the full original amount for all 12 months.
+3. Processing fee: 8% of the loan plus GST, deducted before payout.
+4. Late payment: Rs 500 per day of delay, plus 3% of the overdue EMI.
+5. Prepayment: Not allowed in the first 6 months. After that, 6% of outstanding principal is charged.
+6. The lender may share your contacts and phone data with recovery agents.
+7. The lender may change the interest rate at any time with a notice in its app.
+8. Cheque bounce charge: Rs 1,000 per bounce.
