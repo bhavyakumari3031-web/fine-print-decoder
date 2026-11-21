@@ -1,6 +1,8 @@
 import os
+import io
 import json
 import html
+import base64
 from pathlib import Path
 
 import streamlit as st
@@ -11,6 +13,11 @@ BASE_DIR = Path(__file__).parent
 SAMPLES_DIR = BASE_DIR / "samples"
 load_dotenv(BASE_DIR / ".env")
 MODEL = "openai/gpt-oss-120b"
+VISION_MODELS = [
+    "qwen/qwen3.6-27b",
+    "qwen/qwen3.8-27b",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+]
 
 
 def get_key():
@@ -37,7 +44,7 @@ Read the document and reply with ONLY valid JSON (no markdown, no extra text) in
      "explanation": "1-2 sentences in simple Hinglish, plain text, no markdown"}
   ],
   "questions_to_ask": ["3 to 5 short questions in simple Hinglish the person should ask the provider before signing"],
-    "faq": [{"question": "a question a normal borrower would ask about this document", "answer": "short answer based only on the document, in simple Hinglish"}],
+  "faq": [{"question": "a question a normal borrower would ask about this document", "answer": "short answer based only on the document, in simple Hinglish"}],
   "loan_details": {
     "amount": number or null,
     "tenure_months": number or null,
@@ -47,7 +54,7 @@ Read the document and reply with ONLY valid JSON (no markdown, no extra text) in
     "processing_fee_percent": number or null
   }
 }
-Rules: quote lines exactly as written. Only list real risks. Use null for anything not in the document.Give 4 to 5 faq items.
+Rules: quote lines exactly as written. Only list real risks. Use null for anything not in the document. Give 4 to 5 faq items.
 
 Document:
 """
@@ -92,21 +99,61 @@ def parse_json(raw):
     return json.loads(raw[start:end + 1])
 
 
-def analyse(text):
+def analyse(text, lang):
+    prompt = PROMPT.replace("simple Hinglish", "simple " + lang)
     response = client.chat.completions.create(
         model=MODEL,
-                messages=[{"role": "user", "content": PROMPT.replace("simple Hinglish", "simple " + lang) + text}],
+        messages=[{"role": "user", "content": prompt + text}],
         temperature=0.2,
     )
     return parse_json(response.choices[0].message.content)
 
 
+def shrink_image(data):
+    from PIL import Image
+    img = Image.open(io.BytesIO(data)).convert("RGB")
+    img.thumbnail((1600, 1600))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    return buf.getvalue()
+
+
+def ocr_images(images):
+    content = [{"type": "text", "text": "Extract all the text from these document images exactly as written. Return only the text."}]
+    for mime, data in images:
+        b64 = base64.b64encode(data).decode()
+        content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+    last_error = None
+    for m in VISION_MODELS:
+        try:
+            r = client.chat.completions.create(
+                model=m,
+                messages=[{"role": "user", "content": content}],
+                temperature=0,
+            )
+            return r.choices[0].message.content
+        except Exception as e:
+            last_error = e
+    raise last_error
+
+
 def read_upload(f):
-    if f.name.lower().endswith(".pdf"):
+    name = f.name.lower()
+    data = f.getvalue()
+    if name.endswith((".png", ".jpg", ".jpeg")):
+        return ocr_images([("image/jpeg", shrink_image(data))])
+    if name.endswith(".pdf"):
         from pypdf import PdfReader
-        reader = PdfReader(f)
-        return "\n".join((p.extract_text() or "") for p in reader.pages)
-    return f.getvalue().decode("utf-8", errors="ignore")
+        reader = PdfReader(io.BytesIO(data))
+        text = "\n".join((p.extract_text() or "") for p in reader.pages)
+        if len(text.strip()) > 50:
+            return text
+        import fitz
+        doc = fitz.open(stream=data, filetype="pdf")
+        pages = list(doc)[:3]
+        images = [("image/png", p.get_pixmap(dpi=110).tobytes("png")) for p in pages]
+        return ocr_images(images)
+    return data.decode("utf-8", errors="ignore")
 
 
 def num(x, default):
@@ -160,6 +207,7 @@ def show_results(result):
         st.subheader("✅ Ask before you sign")
         for q in questions:
             st.markdown(f"- {q}")
+
     faq = result.get("faq") or []
     if faq:
         st.subheader("❓ Common questions")
@@ -208,22 +256,47 @@ def calculator(d, run_id):
 st.set_page_config(page_title="Fine-Print Decoder", page_icon="🔍")
 st.markdown(CSS, unsafe_allow_html=True)
 st.markdown('<div class="hero"><h1>🔍 Fine-Print <span class="accent">Decoder</span></h1></div>', unsafe_allow_html=True)
-st.markdown('<p class="tag">Upload a loan, insurance or credit card document. AI finds the hidden traps, in simple Hinglish.</p>', unsafe_allow_html=True)
-
-lang = st.radio("Explain in", ["English", "Hinglish"], horizontal=True)
+st.markdown('<p class="tag">Upload a loan, insurance or credit card document. AI finds the hidden traps, in simple language.</p>', unsafe_allow_html=True)
 
 if "result" not in st.session_state:
     st.session_state.result = None
     st.session_state.run_id = 0
+    st.session_state.doc_text = None
+    st.session_state.qa_answer = None
+    st.session_state.upload_key = None
+    st.session_state.upload_text = ""
 
-uploaded = st.file_uploader("Upload a .txt or .pdf file", type=["txt", "pdf"])
+lang = st.radio("Explain in", ["English", "Hinglish"], horizontal=True)
+
+uploaded = st.file_uploader("Upload a .txt, .pdf, or a photo of the document", type=["txt", "pdf", "png", "jpg", "jpeg"])
 text = st.text_area("...or paste the document here", height=180)
 if uploaded:
-    try:
-        text = read_upload(uploaded)
-    except Exception:
-        text = ""
-        st.error("Could not read that file. Try pasting the text instead.")
+    key = (uploaded.name, uploaded.size)
+    if st.session_state.upload_key != key:
+        try:
+            with st.spinner("Reading the document..."):
+                st.session_state.upload_text = read_upload(uploaded)
+            st.session_state.upload_key = key
+        except Exception as e:
+            st.session_state.upload_text = ""
+            st.error(f"Could not read that file: {e}")
+    text = st.session_state.upload_text
+
+with st.expander("📷 Or take a photo with your camera"):
+    photo = st.camera_input("Hold the document steady and take a clear photo")
+if photo:
+    pdata = photo.getvalue()
+    pkey = ("camera", len(pdata))
+    if st.session_state.upload_key != pkey:
+        try:
+            with st.spinner("Reading the photo..."):
+                st.session_state.upload_text = ocr_images([("image/jpeg", shrink_image(pdata))])
+            st.session_state.upload_key = pkey
+        except Exception as e:
+            st.session_state.upload_text = ""
+            st.error(f"Could not read the photo: {e}")
+    text = st.session_state.upload_text
+
 st.caption("🔒 Use sample or invented documents only. Don't upload real personal data.")
 
 analyse_clicked = st.button("Analyse", type="primary")
@@ -243,14 +316,14 @@ if sample:
     to_analyse = (SAMPLES_DIR / sample).read_text(encoding="utf-8")
 elif analyse_clicked:
     if not text.strip():
-        st.warning("No readable text found. Upload a file or paste the document. For scanned PDFs, paste the text instead.")
+        st.warning("No readable text found. Upload a file or photo, or paste the document.")
     else:
         to_analyse = text
 
 if to_analyse:
     with st.spinner("Reading the fine print..."):
         try:
-            st.session_state.result = analyse(to_analyse)
+            st.session_state.result = analyse(to_analyse, lang)
             st.session_state.doc_text = to_analyse
             st.session_state.qa_answer = None
             st.session_state.run_id += 1
