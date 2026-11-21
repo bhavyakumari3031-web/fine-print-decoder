@@ -38,11 +38,15 @@ Read the document and reply with ONLY valid JSON (no markdown, no extra text) in
   "document_type": "loan | insurance | credit card | other",
   "risk_rating": "Low | Medium | High",
   "risk_reason": "one short sentence in simple Hinglish",
+  "verdict": "Sign | Negotiate first | Avoid",
   "clauses": [
     {"quote": "exact line from the document",
      "severity": "High | Medium | Low",
-     "explanation": "1-2 sentences in simple Hinglish, plain text, no markdown"}
+     "explanation": "1-2 sentences in simple Hinglish, plain text, no markdown",
+     "what_to_do": "one short sentence: what the person should ask for or do about this clause"}
   ],
+  "action_plan": ["3 to 5 concrete steps the person should take before signing, in simple Hinglish"],
+  "safer_alternatives": ["2 to 3 general safer options, like comparing offers or using regulated banks; no company names and no specific interest rates"],
   "questions_to_ask": ["3 to 5 short questions in simple Hinglish the person should ask the provider before signing"],
   "faq": [{"question": "a question a normal borrower would ask about this document", "answer": "short answer based only on the document, in simple Hinglish"}],
   "loan_details": {
@@ -90,6 +94,14 @@ h1, h2, h3 {color:#f1f5f9;}
 [data-testid="stMetric"] {background:#131a2b; padding:14px; border-radius:12px; border:1px solid #1f2a44;}
 [data-testid="stMetricValue"] {color:#4ade80;}
 header[data-testid="stHeader"] {background:transparent;}
+[data-testid="stAlert"] {background:#131a2b !important; border:1px solid #1f2a44; border-radius:12px;}
+[data-testid="stAlert"] * {color:#e6edf7 !important;}
+[data-testid="stFileUploader"] button {background:#4ade80 !important; border:0 !important;}
+[data-testid="stFileUploader"] button, [data-testid="stFileUploader"] button * {color:#0b0f1a !important;}
+[data-testid="stFileUploader"] small, [data-testid="stFileUploader"] section span {color:#94a3b8 !important;}
+input {background:#131a2b !important; color:#e6edf7 !important;}
+.note {background:#131a2b; border:1px solid #1f2a44; border-left:5px solid #fbbf24; color:#e6edf7; border-radius:12px; padding:14px 16px; margin:10px 0;}
+.note-tip {border-left-color:#4ade80;}
 </style>
 """
 
@@ -186,6 +198,9 @@ def show_results(result):
         f'<div class="badge badge-{rating}">{rating.upper()} RISK<small>{reason}</small></div>',
         unsafe_allow_html=True,
     )
+    verdict = result.get("verdict")
+    if verdict:
+        st.markdown(f'<div class="note note-tip">Verdict: <b>{html.escape(str(verdict))}</b></div>', unsafe_allow_html=True)
     clauses = result.get("clauses", [])
     st.subheader(f"⚠️ {len(clauses)} risky clauses found")
     for c in clauses:
@@ -194,14 +209,30 @@ def show_results(result):
             sev = "Medium"
         quote = html.escape(str(c.get("quote", "")))
         why = html.escape(str(c.get("explanation", "")))
+        todo = html.escape(str(c.get("what_to_do", "")))
+        todo_html = f'<p style="margin:8px 0 0 0; color:#4ade80;">💡 {todo}</p>' if todo else ""
         st.markdown(
             f'''<div class="card card-{sev}">
 <div class="sev sev-{sev}">{sev.upper()}</div>
 <div class="quote">{quote}</div>
 <p style="margin:10px 0 0 0;">{why}</p>
+{todo_html}
 </div>''',
             unsafe_allow_html=True,
         )
+
+    plan = result.get("action_plan") or []
+    if plan:
+        st.subheader("🛠️ What you should do")
+        for i, step in enumerate(plan, 1):
+            st.markdown(f"{i}. {step}")
+
+    alts = result.get("safer_alternatives") or []
+    if alts:
+        st.subheader("🔄 Safer options")
+        for a in alts:
+            st.markdown(f"- {a}")
+
     questions = result.get("questions_to_ask") or []
     if questions:
         st.subheader("✅ Ask before you sign")
@@ -252,11 +283,25 @@ def calculator(d, run_id):
     m4.metric("True yearly cost (APR)", f"{apr:.1f}%")
     st.caption(f"Monthly EMI ≈ ₹{emi:,.0f}. Processing fee includes 18% GST. For learning only, not financial advice.")
 
+    adv = monthly_rate * 12 * 100
+    if apr - adv > 5:
+        st.markdown(
+            f'<div class="note">⚠️ The advertised rate looks like {adv:.1f}% a year, but fees and the way interest is charged push the real cost to {apr:.1f}%.</div>',
+            unsafe_allow_html=True,
+        )
+    if kind == "flat" and monthly_rate > 0:
+        emi_r = amount * monthly_rate * (1 + monthly_rate) ** n / ((1 + monthly_rate) ** n - 1)
+        saving = total - emi_r * n
+        if saving > 0:
+            st.markdown(
+                f'<div class="note note-tip">💡 Ask for a reducing-balance loan at the same rate: you would repay about ₹{emi_r * n:,.0f} instead of ₹{total:,.0f}, saving about ₹{saving:,.0f}.</div>',
+                unsafe_allow_html=True,
+            )
 
 st.set_page_config(page_title="Fine-Print Decoder", page_icon="🔍")
 st.markdown(CSS, unsafe_allow_html=True)
 st.markdown('<div class="hero"><h1>🔍 Fine-Print <span class="accent">Decoder</span></h1></div>', unsafe_allow_html=True)
-st.markdown('<p class="tag">Upload a loan, insurance or credit card document. AI finds the hidden traps, in simple language.</p>', unsafe_allow_html=True)
+st.markdown('<p class="tag">Upload a loan, insurance or credit card document. AI finds the hidden traps and tells you what to do.</p>', unsafe_allow_html=True)
 
 if "result" not in st.session_state:
     st.session_state.result = None
